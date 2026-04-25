@@ -16,6 +16,11 @@ const envSchema = z.object({
 
   ANTHROPIC_API_KEY: z.string().optional(),
   RESEND_API_KEY: z.string().optional(),
+  // Sender used for transactional emails. Must be on a domain you've
+  // verified in Resend, otherwise delivery fails.
+  EMAIL_FROM: z.string().default('BloodLink <onboarding@resend.dev>'),
+  // App-side URL scheme for deep-link redirects in email content.
+  APP_DEEP_LINK_SCHEME: z.string().default('bloodlink'),
   MAPBOX_SECRET_TOKEN: z.string().optional(),
   SENTRY_DSN: z.string().optional(),
 

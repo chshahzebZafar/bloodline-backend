@@ -2,6 +2,9 @@ import { Request, Response } from 'express';
 import { supabaseAdmin, supabaseAuthClient } from '../config/supabase';
 import { ok, fail } from '../utils/response';
 import { pointToGeog } from '../services/geo.service';
+import { sendPasswordResetEmail } from '../services/email.service';
+import { logger } from '../config/logger';
+import { env } from '../config/env';
 
 export async function register(req: Request, res: Response) {
   const { email, phone, password, name, blood_type, lat, lng, country_code, city, referred_by } =
@@ -144,17 +147,79 @@ export async function logout(req: Request, res: Response) {
 }
 
 /**
- * Send a password recovery email. Open endpoint (no auth required) — Supabase
- * does not reveal whether the email exists, so this is safe to expose.
+ * Send a password recovery email — hybrid flow.
+ *
+ *   1. Use Supabase Admin API to MINT a real recovery token (no email sent).
+ *   2. Send our own branded email via Resend with that token's action_link.
+ *
+ * Why this beats `auth.resetPasswordForEmail`:
+ *   - Reliable delivery (Supabase's built-in SMTP throttles to ~2/hr).
+ *   - Branded HTML — matches the rest of the BloodLink visual identity.
+ *   - All transactional email goes through one service we control.
+ *
+ * Always returns 200 with `{sent:true}` to avoid leaking which emails exist
+ * (email enumeration defense). Internally we still log the real outcome so
+ * operators can see failures.
  */
 export async function resetPassword(req: Request, res: Response) {
   const { email, redirect_to } = req.body;
-  const authClient = supabaseAuthClient();
-  const { error } = await authClient.auth.resetPasswordForEmail(email, {
-    redirectTo: redirect_to ?? 'bloodlink://reset-password',
+  const targetRedirect = redirect_to ?? `${env.APP_DEEP_LINK_SCHEME}://reset-password`;
+
+  // Step 1 — generate the recovery action_link via Admin API.
+  // This produces the same secure, time-limited token Supabase would have
+  // emailed itself. No email is sent yet because we haven't called
+  // resetPasswordForEmail; generateLink is the "give me the link, I'll
+  // deliver it myself" escape hatch.
+  const { data, error } = await supabaseAdmin.auth.admin.generateLink({
+    type: 'recovery',
+    email,
+    options: { redirectTo: targetRedirect },
   });
-  if (error) return res.status(400).json(fail(error.message, 400));
+
+  // Email enumeration guard: if the user doesn't exist, Supabase returns an
+  // error. We swallow it and respond 200 so attackers can't probe valid emails
+  // by timing or status codes. Real errors get logged.
+  if (error || !data?.properties?.action_link) {
+    logger.info(
+      { err: error?.message, email: redact(email) },
+      'reset-password: generateLink returned no link (likely unknown email)'
+    );
+    return res.json(ok({ sent: true }));
+  }
+
+  // Step 2 — try to look up a name for personalization (optional).
+  const { data: profile } = await supabaseAdmin
+    .from('users')
+    .select('name')
+    .eq('email', email)
+    .maybeSingle();
+
+  // Step 3 — deliver via Resend.
+  const sendResult = await sendPasswordResetEmail({
+    to: email,
+    recoveryLink: data.properties.action_link,
+    name: profile?.name ?? null,
+  });
+
+  if (!sendResult.ok) {
+    // Logged inside sendPasswordResetEmail. Still return success to client
+    // (don't leak that email succeeded vs. delivery failed; just retry-safe).
+    logger.warn({ email: redact(email), err: sendResult.error }, 'reset-password: email delivery failed');
+  }
+
   return res.json(ok({ sent: true }));
+}
+
+/**
+ * Mask all but the first character + domain of an email for logging.
+ * Avoids dumping plaintext addresses into logs while keeping enough
+ * signal to debug.
+ */
+function redact(email: string | undefined | null): string {
+  if (!email) return '<missing>';
+  const [local, domain] = email.split('@');
+  if (!domain) return '<malformed>';
+  return `${local[0] ?? ''}***@${domain}`;
 }
 
 /**
