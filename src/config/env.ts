@@ -27,6 +27,11 @@ const envSchema = z.object({
 
   EDGE_NOTIFY_DONORS_URL: z.string().url().optional().or(z.literal('')),
   EDGE_AWARD_POINTS_URL: z.string().url().optional().or(z.literal('')),
+
+  // Shared secret used by Supabase Database Webhooks to call our internal
+  // endpoints. Treat this like a password — it's the only thing standing
+  // between the public internet and our push fan-out.
+  WEBHOOK_SECRET: z.string().min(20).optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);

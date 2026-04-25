@@ -2,14 +2,12 @@ import { Request, Response } from 'express';
 import { supabaseAdmin } from '../config/supabase';
 import { ok, fail } from '../utils/response';
 import { env } from '../config/env';
-import { findNearbyDonors, findNearbyRequests, pointToGeog } from '../services/geo.service';
+import { findNearbyRequests, pointToGeog } from '../services/geo.service';
 import { getCompatibleDonorTypes } from '../utils/bloodCompat';
 import {
-  buildRequestNotification,
-  recordNotificationsBatch,
-  sendPushToTokens,
   sendPushToUser,
 } from '../services/notification.service';
+import { notifyMatchingDonors } from '../services/matching.service';
 import { awardDonationPoints, awardBonusPoints, markDonorDonated } from '../services/points.service';
 
 export async function createRequest(req: Request, res: Response) {
@@ -44,19 +42,6 @@ export async function createRequest(req: Request, res: Response) {
   );
 
   return res.status(201).json(ok(request));
-}
-
-async function notifyMatchingDonors(request: any, lat: number, lng: number) {
-  const compat = getCompatibleDonorTypes(request.blood_type);
-  const donors = await findNearbyDonors(lat, lng, request.search_radius_km, compat, 500);
-  const tokens = donors.map((d) => d.fcm_token).filter((t): t is string => !!t);
-  const userIds = donors.map((d) => d.id);
-
-  const payload = buildRequestNotification(request, donors[0]?.distance_km ?? 0);
-  await Promise.all([
-    sendPushToTokens(tokens, payload),
-    recordNotificationsBatch(userIds, payload),
-  ]);
 }
 
 export async function getNearbyRequests(req: Request, res: Response) {

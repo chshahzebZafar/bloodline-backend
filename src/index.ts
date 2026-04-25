@@ -19,6 +19,7 @@ import chatRoutes from './routes/chat.routes';
 import hospitalsRoutes from './routes/hospitals.routes';
 import notificationsRoutes from './routes/notifications.routes';
 import eventsRoutes from './routes/events.routes';
+import internalRoutes from './routes/internal.routes';
 
 import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 import { ok, fail } from './utils/response';
@@ -65,6 +66,8 @@ app.use(`${V1}/chats`, chatRoutes);
 app.use(`${V1}/hospitals`, hospitalsRoutes);
 app.use(`${V1}/notifications`, notificationsRoutes);
 app.use(`${V1}/events`, eventsRoutes);
+// Internal — Supabase Database Webhooks fire here. NOT for mobile clients.
+app.use(`${V1}/internal`, internalRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);
