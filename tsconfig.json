@@ -13,13 +13,21 @@
     "declaration": false,
     "sourceMap": true,
     "moduleResolution": "node",
+    "ignoreDeprecations": "5.0",
     "noImplicitAny": true,
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noImplicitReturns": true,
     "noFallthroughCasesInSwitch": true,
-    "types": ["node", "jest"]
+    "types": ["node"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "supabase/functions"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "supabase/functions",
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "**/__tests__/**"
+  ]
 }
