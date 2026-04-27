@@ -13,7 +13,6 @@
     "declaration": false,
     "sourceMap": true,
     "moduleResolution": "node",
-    "ignoreDeprecations": "5.0",
     "noImplicitAny": true,
     "noUnusedLocals": false,
     "noUnusedParameters": false,

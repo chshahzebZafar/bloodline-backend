@@ -7,7 +7,6 @@ import { getCompatibleDonorTypes } from '../utils/bloodCompat';
 import {
   sendPushToUser,
 } from '../services/notification.service';
-import { notifyMatchingDonors } from '../services/matching.service';
 import { awardDonationPoints, awardBonusPoints, markDonorDonated } from '../services/points.service';
 
 export async function createRequest(req: Request, res: Response) {
@@ -36,10 +35,14 @@ export async function createRequest(req: Request, res: Response) {
 
   if (error || !request) return res.status(400).json(fail(error?.message ?? 'Create failed', 400));
 
-  // Fire-and-forget notifications
-  notifyMatchingDonors(request, body.hospital_lat, body.hospital_lng).catch((err) =>
-    console.error('[createRequest] notify failed:', err)
-  );
+  // Fan-out is handled exclusively by the Supabase Database Webhook
+  // (`request-created-push` → POST /v1/internal/request-created), which
+  // catches both API-driven inserts (this endpoint) AND mobile direct-to-DB
+  // inserts via the Supabase JS client. Calling notifyMatchingDonors here
+  // too would deliver duplicate pushes to every matching donor.
+  //
+  // If you ever migrate mobile to call this endpoint exclusively and remove
+  // the webhook, restore the call here.
 
   return res.status(201).json(ok(request));
 }
@@ -159,26 +162,48 @@ export async function fulfillRequest(req: Request, res: Response) {
     .single();
 
   if (!current) return res.status(404).json(fail('Request not found', 404));
-  if (current.recipient_id !== req.user!.id && current.accepted_by !== req.user!.id) {
-    return res.status(403).json(fail('Not a participant in this request', 403));
+
+  // Recipient-confirmation model: only the person who posted the request
+  // (the recipient or their proxy) can mark a donation as completed. The
+  // donor cannot self-confirm — that would let them grind points / donations
+  // without ever showing up at the hospital. The recipient is the natural
+  // witness because they (or their family) see the donor at the hospital.
+  if (current.recipient_id !== req.user!.id) {
+    return res.status(403).json(
+      fail('Only the recipient can confirm a donation as completed', 403)
+    );
   }
+
   if (current.status !== 'accepted') {
     return res.status(409).json(fail('Request not in accepted state', 409));
   }
 
+  // Idempotency: atomic compare-and-set on status. If two confirm requests
+  // arrive concurrently (slow network, double-tap) only one gets through and
+  // the other returns the already-fulfilled row without double-awarding.
   const { data, error } = await supabaseAdmin
     .from('blood_requests')
     .update({ status: 'fulfilled', fulfilled_at: new Date().toISOString() })
     .eq('id', req.params.id)
+    .eq('status', 'accepted')                // ← guard against race
     .select('*')
     .single();
 
-  if (error || !data) return res.status(400).json(fail('Fulfill failed', 400));
+  if (error || !data) {
+    return res.status(409).json(fail('Already fulfilled or no longer eligible', 409));
+  }
 
   if (current.accepted_by) {
+    // Side effects only fire on the winning transition. Failures here don't
+    // roll back the status change — points / donation row are best-effort
+    // and idempotent on retry. Logged for operator follow-up.
     await Promise.all([
-      awardDonationPoints(current.accepted_by),
-      markDonorDonated(current.accepted_by),
+      awardDonationPoints(current.accepted_by).catch((err) =>
+        console.error('[fulfill] award points failed:', err)
+      ),
+      markDonorDonated(current.accepted_by).catch((err) =>
+        console.error('[fulfill] markDonorDonated failed:', err)
+      ),
       supabaseAdmin.from('donations').insert({
         donor_id: current.accepted_by,
         request_id: current.id,

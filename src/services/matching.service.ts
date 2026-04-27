@@ -46,7 +46,12 @@ export async function notifyMatchingDonors(
 ): Promise<{ targeted: number; delivered: number }> {
   const compat = getCompatibleDonorTypes(request.blood_type);
   const donors = await findNearbyDonors(lat, lng, request.search_radius_km, compat, 500);
-  const tokens = donors.map((d) => d.fcm_token).filter((t): t is string => !!t);
+  // Pair each token with the donor it belongs to so invalid-token cleanup
+  // clears the right row even if the same FCM token has briefly landed on
+  // multiple user rows (logout/login on a shared device).
+  const targets = donors
+    .filter((d): d is typeof d & { fcm_token: string } => !!d.fcm_token)
+    .map((d) => ({ userId: d.id, token: d.fcm_token }));
   const userIds = donors.map((d) => d.id);
 
   const payload = buildRequestNotification(
@@ -54,7 +59,7 @@ export async function notifyMatchingDonors(
     donors[0]?.distance_km ?? 0
   );
   const [delivered] = await Promise.all([
-    sendPushToTokens(tokens, payload),
+    sendPushToTokens(targets, payload),
     recordNotificationsBatch(userIds, payload),
   ]);
 

@@ -96,8 +96,15 @@ export async function onRequestCreated(req: Request, res: Response) {
 }
 
 /**
- * Notify the recipient when a donor accepts their request (status open→accepted).
- * Fired by an UPDATE webhook on blood_requests.
+ * Push notifications for blood_requests UPDATE events. One handler covers
+ * multiple status transitions because they all flow through the same webhook.
+ *
+ * Currently handles:
+ *   open      → accepted   : push to recipient ("a donor is on the way")
+ *   accepted  → fulfilled  : push to donor    ("thanks, points awarded")
+ *
+ * Other transitions (cancelled, expired) are intentionally silent — those
+ * states don't benefit from a push and could be surprising.
  */
 export async function onRequestAccepted(req: Request, res: Response) {
   const payload = req.body as WebhookPayload;
@@ -108,28 +115,41 @@ export async function onRequestAccepted(req: Request, res: Response) {
 
   const { record: row, old_record: prev } = payload;
 
-  // Only fire on the open → accepted transition. Other status changes
-  // (cancelled, fulfilled, expired) get their own handling.
+  // ---- Transition 1: open → accepted (notify recipient) ----
   const justAccepted =
     prev?.status === 'open' && row?.status === 'accepted' && row?.accepted_by;
 
-  if (!justAccepted) {
-    return res.json(ok({ skipped: true, reason: 'not an accept transition' }));
+  if (justAccepted) {
+    const { data: donor } = await supabaseAdmin
+      .from('users')
+      .select('name, blood_type')
+      .eq('id', row.accepted_by)
+      .maybeSingle();
+
+    await sendPushToUser(row.recipient_id, {
+      title: '✅ Donor accepted your request',
+      body: `${donor?.name ?? 'A donor'} (${donor?.blood_type ?? row.blood_type}) is on the way to ${row.hospital_name}.`,
+      data: { request_id: row.id, screen: 'RequestDetail' },
+    }).catch((err) => logger.warn({ err }, 'accept push failed'));
+
+    return res.json(ok({ notified: row.recipient_id, transition: 'accepted' }));
   }
 
-  const { data: donor } = await supabaseAdmin
-    .from('users')
-    .select('name, blood_type')
-    .eq('id', row.accepted_by)
-    .maybeSingle();
+  // ---- Transition 2: accepted → fulfilled (thank the donor) ----
+  const justFulfilled =
+    prev?.status === 'accepted' && row?.status === 'fulfilled' && row?.accepted_by;
 
-  await sendPushToUser(row.recipient_id, {
-    title: '✅ Donor accepted your request',
-    body: `${donor?.name ?? 'A donor'} (${donor?.blood_type ?? row.blood_type}) is on the way to ${row.hospital_name}.`,
-    data: { request_id: row.id, screen: 'RequestDetail' },
-  }).catch((err) => logger.warn({ err }, 'accept push failed'));
+  if (justFulfilled) {
+    await sendPushToUser(row.accepted_by, {
+      title: '🩸 Thank you for donating!',
+      body: `Your donation at ${row.hospital_name} has been confirmed. Points credited to your account.`,
+      data: { request_id: row.id, screen: 'RequestDetail' },
+    }).catch((err) => logger.warn({ err }, 'fulfill push failed'));
 
-  return res.json(ok({ notified: row.recipient_id }));
+    return res.json(ok({ notified: row.accepted_by, transition: 'fulfilled' }));
+  }
+
+  return res.json(ok({ skipped: true, reason: 'no notifiable transition' }));
 }
 
 /**

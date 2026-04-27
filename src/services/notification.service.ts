@@ -15,15 +15,39 @@ function chunk<T>(arr: T[], size: number): T[][] {
   );
 }
 
-export async function sendPushToTokens(tokens: string[], payload: PushPayload): Promise<number> {
+/**
+ * Push target — pairs an FCM token with the user it currently belongs to.
+ *
+ * We track userId alongside the token because invalid-token cleanup needs
+ * to clear by user (not by token value). A token can briefly exist on two
+ * user rows when the same physical device switches accounts: clearing by
+ * token value would wipe the freshly-valid token from the new user too.
+ */
+export interface PushTarget {
+  userId: string;
+  token: string;
+}
+
+export async function sendPushToTokens(
+  targets: PushTarget[],
+  payload: PushPayload
+): Promise<number> {
   const admin = initFirebase();
-  if (!admin || !tokens.length) return 0;
+  if (!admin || !targets.length) return 0;
 
-  const unique = Array.from(new Set(tokens.filter(Boolean)));
+  // Dedupe by token but preserve the userId mapping so we can clear precisely.
+  // If a token genuinely appears on two userIds, we'll only have the first
+  // mapping — that's fine for delivery (FCM handles dedupe) and acceptable
+  // for cleanup (worst case a stale row sticks around one extra cycle).
+  const tokenToUser = new Map<string, string>();
+  for (const t of targets) {
+    if (t.token && !tokenToUser.has(t.token)) tokenToUser.set(t.token, t.userId);
+  }
+  const uniqueTokens = Array.from(tokenToUser.keys());
   let delivered = 0;
-  const invalidTokens: string[] = [];
+  const invalidUserIds: string[] = [];
 
-  for (const batch of chunk(unique, 500)) {
+  for (const batch of chunk(uniqueTokens, 500)) {
     const res = await admin.messaging().sendEachForMulticast({
       tokens: batch,
       notification: { title: payload.title, body: payload.body },
@@ -40,14 +64,19 @@ export async function sendPushToTokens(tokens: string[], payload: PushPayload): 
           code === 'messaging/registration-token-not-registered' ||
           code === 'messaging/invalid-registration-token'
         ) {
-          invalidTokens.push(batch[i]);
+          const owner = tokenToUser.get(batch[i]);
+          if (owner) invalidUserIds.push(owner);
         }
       }
     });
   }
 
-  if (invalidTokens.length) {
-    await supabaseAdmin.from('users').update({ fcm_token: null }).in('fcm_token', invalidTokens);
+  if (invalidUserIds.length) {
+    // Clear the token on the *user row that owned this stale token at fan-out
+    // time*, not on every row whose fcm_token equals the value. The latter
+    // would also wipe a freshly-registered token on a different user who
+    // happens to be on the same device after a logout/login swap.
+    await supabaseAdmin.from('users').update({ fcm_token: null }).in('id', invalidUserIds);
   }
 
   return delivered;
@@ -68,7 +97,7 @@ export async function sendPushToUser(userId: string, payload: PushPayload): Prom
   });
 
   if (!data?.fcm_token) return 0;
-  return sendPushToTokens([data.fcm_token], payload);
+  return sendPushToTokens([{ userId, token: data.fcm_token }], payload);
 }
 
 export function buildRequestNotification(
